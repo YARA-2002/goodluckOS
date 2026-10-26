@@ -1,8 +1,7 @@
 ################################################################################
 # ParaLLEl N64 for GA36-MB / goodluckOS — EXPERIMENTAL, UNTESTED RECIPE
 ################################################################################
-
-PARALLEL_N64_GA36_VERSION = master
+PARALLEL_N64_GA36_VERSION = 649c6f898b22eeaece20bbefca6301cb120b126c
 PARALLEL_N64_GA36_SITE = https://github.com/libretro/parallel-n64.git
 PARALLEL_N64_GA36_SITE_METHOD = git
 PARALLEL_N64_GA36_GIT_SUBMODULES = YES
