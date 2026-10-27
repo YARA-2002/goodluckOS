@@ -1,0 +1,85 @@
+name: GA36 N64 short source preflight
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/n64-source-preflight.yml'
+      - 'rootfs/package/parallel-n64-ga36/**'
+      - 'rootfs/package/Config.in'
+      - 'rootfs/configs/goodluck_defconfig'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout goodluckOS
+        uses: actions/checkout@v4
+
+      - name: Validate GA36 Buildroot recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipe='rootfs/package/parallel-n64-ga36/parallel-n64-ga36.mk'
+          test -f "$recipe"
+          test -f rootfs/package/parallel-n64-ga36/Config.in
+          grep -Fq 'source "../package/parallel-n64-ga36/Config.in"' rootfs/package/Config.in
+          grep -Fq 'BR2_PACKAGE_PARALLEL_N64_GA36=y' rootfs/configs/goodluck_defconfig
+          test "$(grep -c '^define PARALLEL_N64_GA36_BUILD_CMDS' "$recipe")" -eq 1
+          test "$(grep -c '^define PARALLEL_N64_GA36_INSTALL_TARGET_CMDS' "$recipe")" -eq 1
+          grep -Fq 'PARALLEL_N64_GA36_GIT_SUBMODULES = YES' "$recipe"
+          sha="$(sed -nE 's/^PARALLEL_N64_GA36_VERSION[[:space:]]*=[[:space:]]*([0-9a-f]{40})[[:space:]]*$/\1/p' "$recipe")"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'ERROR: expected a pinned 40-character source commit' >&2
+            exit 1
+          fi
+          echo "UPSTREAM_SHA=$sha" >> "$GITHUB_ENV"
+          echo "Using pinned ParaLLEl N64 source: $sha"
+
+      - name: Fetch pinned source and required libretro-common submodule
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/libretro/parallel-n64.git
+          git -C upstream fetch -q --depth=1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout -q --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_SHA"
+          git -C upstream submodule update --init --depth 1 -- libretro-common
+          test -f upstream/libretro-common/include/boolean.h
+          test -f upstream/libretro/libretro_private.h
+          test -f upstream/Makefile.common
+          grep -Fq '#include <boolean.h>' upstream/libretro/libretro_private.h
+          echo 'Pinned source and boolean.h: OK'
+
+      - name: Inspect effective Makefile flags without building Buildroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -s -C upstream \
+            platform=unix FORCE_GLES=1 GL_LIB=-lGLESv2 \
+            CC=cc CXX=c++ AR=ar RANLIB=ranlib \
+            CPUFLAGS="-DNO_ASM -DARM -D__arm__ -DARM_ASM -D__NEON_OPT -DNOSSE -DARM_FIX" \
+            WITH_DYNAREC=arm HAVE_NEON=1 HAVE_PARALLEL=0 HAVE_PARALLEL_RSP=0 \
+            print-CFLAGS print-CXXFLAGS print-LDFLAGS print-TARGET > effective-flags.txt
+          grep -Fq -- '-I./libretro-common/include' effective-flags.txt
+          grep -Fq -- '-DHAVE_OPENGLES2' effective-flags.txt
+          grep -Fq -- '-shared' effective-flags.txt
+          grep -Fq -- 'TARGET=parallel_n64_libretro.so' effective-flags.txt
+          echo 'Header include path, GLES2, shared-library linking, and output name: OK'
+
+      - name: Compile a small host-only libretro header probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '#include <boolean.h>\n#include <libretro.h>\n#include "libretro/libretro_private.h"\nint main(void) { return 0; }\n' | \
+            cc -fsyntax-only -x c \
+              -Iupstream/libretro-common/include \
+              -Iupstream/include \
+              -Iupstream/libretro \
+              -Iupstream -
+          echo 'Header probe: OK (host syntax check only, NOT an ARM core build)'
