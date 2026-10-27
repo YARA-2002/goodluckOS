@@ -2,6 +2,7 @@ name: GA36 N64 short source preflight
 
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
     paths:
       - '.github/workflows/n64-source-preflight.yml'

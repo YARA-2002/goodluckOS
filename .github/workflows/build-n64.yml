@@ -8,13 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  source-preflight:
+    uses: ./.github/workflows/n64-source-preflight.yml
+
   build-n64:
+    needs: source-preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 240
 
     steps:
       - name: Checkout project
         uses: actions/checkout@v4
+
+      - name: Prepare download cache directory
+        run: mkdir -p rootfs/dl
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: rootfs/dl
+          key: ga36-br-dl-v1-${{ hashFiles('rootfs/Dockerfile', 'rootfs/configs/goodluck_defconfig') }}
+          restore-keys: |
+            ga36-br-dl-v1-
 
       - name: Build N64 core
         working-directory: rootfs
