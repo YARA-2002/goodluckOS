@@ -10,13 +10,12 @@ PARALLEL_N64_GA36_DEPENDENCIES = mesa3d zlib host-pkgconf
 
 # Build with the same target libc, hard-float ABI and GLES libraries as goodluckOS.
 # Upstream Makefile has its own CPUFLAGS; set them on the make command-line.
+
 define PARALLEL_N64_GA36_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) \
 		platform=unix FORCE_GLES=1 GL_LIB=-lGLESv2 \
 		CC="$(TARGET_CC)" CXX="$(TARGET_CXX)" \
 		AR="$(TARGET_AR)" RANLIB="$(TARGET_RANLIB)" \
-		CFLAGS="$(TARGET_CFLAGS)" CXXFLAGS="$(TARGET_CXXFLAGS)" \
-		LDFLAGS="$(TARGET_LDFLAGS)" \
 		CPUFLAGS="$(TARGET_CFLAGS) -DNO_ASM -DARM -D__arm__ -DARM_ASM -D__NEON_OPT -DNOSSE -DARM_FIX" \
 		WITH_DYNAREC=arm HAVE_NEON=1 HAVE_PARALLEL=0 HAVE_PARALLEL_RSP=0
 endef
