@@ -1,3 +1,4 @@
+#include <ctime>
 #include <SDL2/SDL.h>
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -162,7 +163,7 @@ int main(int argc, char* argv[]) {
     while (running) {
         SDL_Event event;
 
-        if (SDL_WaitEvent(&event)) {
+        if (SDL_WaitEventTimeout(&event, 50)) {
             do {
                 ImGui_ImplSDL2_ProcessEvent(&event);
                 if (event.type == SDL_QUIT) {
@@ -206,19 +207,57 @@ int main(int argc, char* argv[]) {
         }
 
         if (ImGui::Button("System Settings")) {
-            // CPU Governer [select box]
-            // CPU info [label]
-            // Ram info [label]
-            // Show free space on SD card
-            // Maybe move this to a dedicated System Info app?
+            ImGui::OpenPopup("System Information");
+        }
+        if (ImGui::BeginPopupModal("System Information", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("CPU cores: %d", SDL_GetCPUCount());
+            ImGui::Text("Total RAM: %d MB", SDL_GetSystemRAM());
+            if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
         if (ImGui::Button("Input Settings")) {
-            // Swap A/B [toggle]
-            // Input Tester (maybe this should be it's own app?)
+            ImGui::OpenPopup("Input Tester");
+        }
+        if (ImGui::BeginPopupModal("Input Tester", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (controller && SDL_GameControllerGetAttached(controller)) {
+                bool pressed = false;
+                for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i) {
+                    SDL_GameControllerButton button = static_cast<SDL_GameControllerButton>(i);
+                    if (SDL_GameControllerGetButton(controller, button)) {
+                        const char* name = SDL_GameControllerGetStringForButton(button);
+                        ImGui::Text("Pressed: %s", name ? name : "Unknown");
+                        pressed = true;
+                    }
+                }
+                if (!pressed) ImGui::Text("No button pressed");
+                for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i) {
+                    SDL_GameControllerAxis axis = static_cast<SDL_GameControllerAxis>(i);
+                    int value = SDL_GameControllerGetAxis(controller, axis);
+                    if (value > 6000 || value < -6000) {
+                        const char* name = SDL_GameControllerGetStringForAxis(axis);
+                        ImGui::Text("%s: %d", name ? name : "Axis", value);
+                    }
+                }
+            } else {
+                ImGui::Text("No gamepad detected");
+            }
+            if (ImGui::Button("Close Tester")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
         if (ImGui::Button("Date/Time")) {
-            // Set date
-            // Set Time
+            ImGui::OpenPopup("Date/Time Information");
+        }
+        if (ImGui::BeginPopupModal("Date/Time Information", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::time_t now = std::time(nullptr);
+            std::tm* dt = std::localtime(&now);
+            if (dt) {
+                ImGui::Text("Date: %04d-%02d-%02d", dt->tm_year + 1900, dt->tm_mon + 1, dt->tm_mday);
+                ImGui::Text("Time: %02d:%02d:%02d", dt->tm_hour, dt->tm_min, dt->tm_sec);
+            } else {
+                ImGui::Text("System clock unavailable");
+            }
+            if (ImGui::Button("Close Date/Time")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
 
         ImGui::Spacing();

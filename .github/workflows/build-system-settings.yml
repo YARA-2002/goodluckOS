@@ -1,0 +1,69 @@
+name: Build GA36 System Settings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-settings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Verify that the local source changes were committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          src='rootfs/package/system-settings/system-settings.cpp'
+          test -s "$src"
+          grep -Fq 'BeginPopupModal("System Information"' "$src"
+          grep -Fq 'BeginPopupModal("Input Tester"' "$src"
+          grep -Fq 'BeginPopupModal("Date/Time Information"' "$src"
+          grep -Fq 'SDL_WaitEventTimeout(&event, 50)' "$src"
+          echo 'All four settings changes are present.'
+
+      - name: Create Buildroot directories
+        run: mkdir -p rootfs/dl rootfs/out
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: rootfs/dl
+          key: ga36-settings-br-dl-v1-${{ hashFiles('rootfs/Dockerfile', 'rootfs/configs/goodluck_defconfig') }}
+          restore-keys: |
+            ga36-settings-br-dl-v1-
+            ga36-br-dl-v1-
+
+      - name: Build system-settings package (and required dependencies)
+        working-directory: rootfs
+        run: |
+          docker compose run --build --rm goodluck-builder bash -lc '
+            set -e
+            /src/scripts/configure.sh
+            /src/scripts/build.sh system-settings
+          '
+
+      - name: Inspect the resulting ARM executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin='rootfs/out/target/usr/bin/system-settings'
+          test -s "$bin"
+          file "$bin"
+          readelf -h "$bin"
+          readelf --version-info "$bin" | head -n 100 || true
+          test "$(readelf -h "$bin" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = 'ARM'
+          mkdir -p settings-output
+          cp "$bin" settings-output/system-settings
+
+      - name: Upload experimental executable (do not install automatically)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GA36-System-Settings-Experimental
+          path: settings-output/system-settings
+          if-no-files-found: error
