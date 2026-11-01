@@ -1,0 +1,75 @@
+name: Build GA36 RetroArch (Ozone + RGUI)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/retroarch-ozone-rgui
+    paths:
+      - rootfs/configs/goodluck_defconfig
+
+permissions:
+  contents: read
+
+jobs:
+  build-retroarch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout experimental branch
+        uses: actions/checkout@v4
+
+      - name: Verify menu options and default RGUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fxq 'BR2_PACKAGE_RETROARCH_RGUI_MENU=y' rootfs/configs/goodluck_defconfig
+          grep -Fxq 'BR2_PACKAGE_RETROARCH_OZONE_MENU=y' rootfs/configs/goodluck_defconfig
+          ! grep -Fxq 'BR2_PACKAGE_RETROARCH_XMB_MENU=y' rootfs/configs/goodluck_defconfig
+          grep -Fq 'menu_driver = "rgui"' rootfs/package/retroarch/retroarch.cfg
+
+      - name: Prepare Buildroot directories
+        run: mkdir -p rootfs/dl rootfs/out
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: rootfs/dl
+          key: ga36-retroarch-ozone-downloads-v1-${{ hashFiles('rootfs/Dockerfile', 'rootfs/configs/goodluck_defconfig') }}
+          restore-keys: |
+            ga36-retroarch-ozone-downloads-v1-
+            ga36-settings-br-dl-v1-
+            ga36-br-dl-v1-
+
+      - name: Build RetroArch package only and its dependencies
+        working-directory: rootfs
+        run: |
+          docker compose run --build --rm goodluck-builder bash -lc '
+            set -e
+            /src/scripts/configure.sh
+            grep -Fxq "BR2_PACKAGE_RETROARCH_RGUI_MENU=y" /src/out/.config
+            grep -Fxq "BR2_PACKAGE_RETROARCH_OZONE_MENU=y" /src/out/.config
+            /src/scripts/build.sh retroarch
+          '
+
+      - name: Inspect ARM binary and prepare experimental artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=rootfs/out/target/usr/bin/retroarch
+          test -s "$bin"
+          file "$bin"
+          readelf -h "$bin"
+          test "$(readelf -h "$bin" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = 'ARM'
+          mkdir -p retroarch-output
+          cp "$bin" retroarch-output/retroarch
+          sha256sum retroarch-output/retroarch > retroarch-output/SHA256SUMS.txt
+          echo 'Compiled for ARM; runtime compatibility must still be tested on the experimental SD card.'
+
+      - name: Upload executable for manual testing (never auto-install)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GA36-RetroArch-RGUI-Ozone-Experimental
+          path: retroarch-output/
+          if-no-files-found: error
