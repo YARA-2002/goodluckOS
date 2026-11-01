@@ -23,6 +23,7 @@ static const char* kPuppyFiles[]   = {"/home/player/.local/share/applications"};
 //static const char* kLaunchFile    = "/dev/shm/launch";
 static const char* kStateFile     = "/dev/shm/launcher_state";
 static const char* kAutoStartFile = "/home/player/autolaunch";
+static const char* kThemeRoot = "/home/player/.config/puppy/themes/n64-unified";
 
 constexpr int kScreenW              = 640;
 constexpr int kScreenH              = 480;
@@ -54,6 +55,45 @@ constexpr SDL_Color kBlack  {0, 0, 0, 255};
 constexpr SDL_Color kYellow {255, 205, 60, 255};
 constexpr SDL_Color kTile   {40, 40, 44, 255};
 constexpr SDL_Color kClear  {24, 24, 28, 255};
+
+// Works for built-in archives and any user-defined category in apps.puppy.
+static std::string categorySlug(const std::string& name) {
+    std::string out;
+    bool separator = false;
+    for (unsigned char c : name) {
+        if (std::isalnum(c)) {
+            if (separator && !out.empty()) out.push_back('-');
+            separator = false;
+            out.push_back((char)std::tolower(c));
+        } else {
+            separator = true;
+        }
+    }
+    return out.empty() ? "games" : out;
+}
+static SDL_Color categoryAccent(const std::string& name) {
+    std::string n = name;
+    for (char& c : n) c = (char)std::tolower((unsigned char)c);
+    if (n.find("nintendo 64") != std::string::npos || n.find("n64") != std::string::npos)
+        return {68, 153, 255, 255};
+    if (n.find("playstation") != std::string::npos || n.find("psp") != std::string::npos)
+        return {110, 174, 250, 255};
+    if (n.find("sega") != std::string::npos || n.find("genesis") != std::string::npos)
+        return {83, 193, 244, 255};
+    if (n.find("game boy") != std::string::npos || n.find("gba") != std::string::npos)
+        return {91, 213, 141, 255};
+    if (n.find("super nintendo") != std::string::npos || n.find("snes") != std::string::npos)
+        return {165, 135, 241, 255};
+    if (n.find("nintendo") != std::string::npos || n.find("nes") != std::string::npos)
+        return {240, 98, 93, 255};
+    unsigned int hash = 2166136261u;
+    for (unsigned char c : n) { hash ^= c; hash *= 16777619u; }
+    constexpr SDL_Color palette[] = {
+        {240, 98, 93, 255}, {91, 213, 141, 255},
+        {68, 153, 255, 255}, {241, 205, 91, 255}
+    };
+    return palette[hash % 4];
+}
 
 // String helper functions
 static std::string trim(const std::string& s) {
@@ -226,7 +266,7 @@ struct Entry {
     std::string command;
     std::string iconPath;
 
-    void render(SDL_Renderer* r, IconCache& icons, TTF_Font* badgeFont, int x, int y, bool selected, bool autostart) const {
+    void render(SDL_Renderer* r, IconCache& icons, TTF_Font* badgeFont, int x, int y, bool selected, bool autostart, SDL_Color accent) const {
         SDL_Rect cell{x, y, kCellWidth, kCellHeight};
         SDL_SetRenderDrawColor(r, kTile.r, kTile.g, kTile.b, kTile.a);
         SDL_RenderFillRect(r, &cell);
@@ -238,7 +278,7 @@ struct Entry {
         }
 
         if (selected) {
-            SDL_SetRenderDrawColor(r, kYellow.r, kYellow.g, kYellow.b, kYellow.a);
+            SDL_SetRenderDrawColor(r, accent.r, accent.g, accent.b, accent.a);
             SDL_Rect strips[4] = {
                 {x, y, kCellWidth, kBorder},                                // top
                 {x, y + kCellHeight - kBorder, kCellWidth, kBorder},        // bottom
@@ -254,7 +294,7 @@ struct Entry {
             int tw = textWidth(badgeFont, label);
             int th = TTF_FontHeight(badgeFont);
             SDL_Rect badge{x, y, tw + padX * 2, th + padY * 2};
-            SDL_SetRenderDrawColor(r, kYellow.r, kYellow.g, kYellow.b, kYellow.a);
+            SDL_SetRenderDrawColor(r, accent.r, accent.g, accent.b, accent.a);
             SDL_RenderFillRect(r, &badge);
             drawText(r, badgeFont, label, badge.x + padX, badge.y + padY, kBlack);
         }
@@ -604,6 +644,8 @@ public:
     ~Ui() {
         icons.reset();
         if (overlay) SDL_DestroyTexture(overlay);
+        for (auto& item : themeBackgrounds) if (item.second) SDL_DestroyTexture(item.second);
+        for (auto& item : themeLogos) if (item.second) SDL_DestroyTexture(item.second);
         for (TTF_Font* f : {uiFont, titleFont, descFont, badgeFont}) if (f) TTF_CloseFont(f);
         if (renderer) SDL_DestroyRenderer(renderer);
         if (window) SDL_DestroyWindow(window);
@@ -616,8 +658,8 @@ public:
     bool ok() const { return ok_; }
 
     void render(const Model& m, int battery) {
-        SDL_SetRenderDrawColor(renderer, kClear.r, kClear.g, kClear.b, kClear.a);
-        SDL_RenderClear(renderer);
+        const std::string activeCategory = m.categories.empty() ? std::string("Games") : m.categories[m.row].name;
+        drawThemeBackground(activeCategory);
 
         for (int r = 0; r < (int)m.categories.size(); ++r) {
             int y = kSelY + (r - m.row) * kPitchY;
@@ -629,7 +671,7 @@ public:
                 int x = kSelX + (c - rowCol) * kPitchX;
                 if (x >= kScreenW || x + kCellWidth <= 0) continue;
                 entries[c].render(renderer, *icons, badgeFont, x, y,
-                                  r == m.row && c == rowCol, m.isAutoStart(r, c));
+                                  r == m.row && c == rowCol, m.isAutoStart(r, c), categoryAccent(m.categories[r].name));
             }
         }
 
@@ -643,14 +685,64 @@ private:
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* overlay = nullptr;
+    std::map<std::string, SDL_Texture*> themeBackgrounds;
+    std::map<std::string, SDL_Texture*> themeLogos;
     TTF_Font *uiFont = nullptr, *titleFont = nullptr, *descFont = nullptr, *badgeFont = nullptr;
     std::unique_ptr<IconCache> icons;
+
+    SDL_Texture* themeImage(std::map<std::string, SDL_Texture*>& cache, const std::string& path) {
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+        SDL_Texture* texture = IMG_LoadTexture(renderer, path.c_str());
+        if (texture) SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        cache.emplace(path, texture);
+        return texture;
+    }
+
+    void drawThemeBackground(const std::string& category) {
+        const SDL_Color accent = categoryAccent(category);
+        SDL_SetRenderDrawColor(renderer, kClear.r, kClear.g, kClear.b, kClear.a);
+        SDL_RenderClear(renderer);
+        for (int y = 0; y < kScreenH; y += 24) {
+            const Uint8 v = (Uint8)(19 + y / 48);
+            SDL_SetRenderDrawColor(renderer, v, v, (Uint8)(v + 9), 255);
+            SDL_Rect stripe{0, y, kScreenW, 24};
+            SDL_RenderFillRect(renderer, &stripe);
+        }
+        SDL_SetRenderDrawColor(renderer, accent.r, accent.g, accent.b, 255);
+        SDL_Rect left{0, 0, 7, kScreenH};
+        SDL_Rect top{0, 58, kScreenW, 3};
+        SDL_RenderFillRect(renderer, &left);
+        SDL_RenderFillRect(renderer, &top);
+        const std::string p = std::string(kThemeRoot) + "/backgrounds/" + categorySlug(category) + ".png";
+        if (SDL_Texture* bg = themeImage(themeBackgrounds, p)) {
+            SDL_Rect full{0, 0, kScreenW, kScreenH};
+            SDL_RenderCopy(renderer, bg, nullptr, &full);
+            SDL_SetRenderDrawColor(renderer, 6, 9, 20, 130);
+            SDL_RenderFillRect(renderer, &full);
+        }
+    }
 
     void drawText_(const Model& m, int battery) {
         const int maxW = kScreenW - 2 * kTextMargin;
 
-        if (!m.categories.empty())
-            drawText(renderer, uiFont, m.categories[m.row].name, kTextMargin, kHeaderTextYMargin, kWhite, maxW);
+        if (!m.categories.empty()) {
+            const std::string& category = m.categories[m.row].name;
+            const std::string p = std::string(kThemeRoot) + "/logos/" + categorySlug(category) + ".png";
+            SDL_Texture* logo = themeImage(themeLogos, p);
+            if (logo) {
+                int w = 0, h = 0;
+                if (SDL_QueryTexture(logo, nullptr, nullptr, &w, &h) == 0 && w > 0 && h > 0) {
+                    const float scale = std::min(300.0f / w, 43.0f / h);
+                    SDL_Rect dst{kTextMargin, 7, std::max(1, (int)(w * scale)), std::max(1, (int)(h * scale))};
+                    SDL_RenderCopy(renderer, logo, nullptr, &dst);
+                } else {
+                    drawText(renderer, uiFont, category, kTextMargin, kHeaderTextYMargin, kWhite, maxW);
+                }
+            } else {
+                drawText(renderer, uiFont, category, kTextMargin, kHeaderTextYMargin, kWhite, maxW);
+            }
+        }
 
         std::string s;
         if (battery >= 0) {
