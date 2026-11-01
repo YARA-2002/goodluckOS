@@ -224,19 +224,14 @@ private:
         SDL_Surface* result = src;
 
         if (src->w > kCellWidth || src->h > kCellHeight) {
-            // Scale and crop so icons cover the cell if they're too large.
-            float scale = std::max((float)kCellWidth / src->w, (float)kCellHeight / src->h);
-            SDL_Rect crop;
-            crop.w = std::min(src->w, (int)std::lround(kCellWidth  / scale));
-            crop.h = std::min(src->h, (int)std::lround(kCellHeight / scale));
-            crop.x = (src->w - crop.w) / 2;
-            crop.y = (src->h - crop.h) / 2;
-
-            SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, kCellWidth, kCellHeight, 32, SDL_PIXELFORMAT_RGBA32);
+            // Show complete portrait box covers instead of cropping their artwork.
+            const float scale = std::min((float)kCellWidth / src->w, (float)kCellHeight / src->h);
+            const int w = std::max(1, (int)std::lround(src->w * scale));
+            const int h = std::max(1, (int)std::lround(src->h * scale));
+            SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
             if (!out) { SDL_FreeSurface(src); return icon; }
-
             SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
-            SDL_SoftStretchLinear(src, &crop, out, nullptr);
+            SDL_SoftStretchLinear(src, nullptr, out, nullptr);
             SDL_FreeSurface(src);
             result = out;
         }
@@ -449,10 +444,14 @@ static std::string buildArchiveCommand(const std::string& tmpl, const std::strin
 static std::string findArchiveIcon(const Archive& a, const std::string& stem) {
     static const char* kExts[] = {"png", "jpg", "jpeg"};
     for (const auto& dir : a.iconDirs) {
-        for (const char* ext : kExts) {
-            fs::path p = fs::path(dir) / (stem + "." + ext);
-            std::error_code ec;
-            if (fs::is_regular_file(p, ec)) return p.string();
+        // Existing roms/<system>/icons remain supported.
+        // Artwork from sibling roms/<system>/covers takes precedence.
+        for (const auto& candidate : {fs::path(dir).parent_path() / "covers", fs::path(dir)}) {
+            for (const char* ext : kExts) {
+                fs::path p = candidate / (stem + "." + ext);
+                std::error_code ec;
+                if (fs::is_regular_file(p, ec)) return p.string();
+            }
         }
     }
     return a.defaultIcon;
