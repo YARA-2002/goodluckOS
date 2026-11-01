@@ -1,0 +1,77 @@
+name: Build GA36 Puppy Multi-System Theme
+
+on:
+  push:
+    branches:
+      - experiment/puppy-n64-theme-all-systems
+    paths:
+      - .github/workflows/build-puppy-theme.yml
+      - rootfs/package/puppy/puppy.cpp
+      - docs/puppy-n64-theme-all-systems.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-puppy-theme:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout experimental Puppy theme
+        uses: actions/checkout@v4
+
+      - name: Check all-system theme code is included
+        shell: bash
+        run: |
+          set -euo pipefail
+          src='rootfs/package/puppy/puppy.cpp'
+          grep -Fq 'categoryAccent(' "$src"
+          grep -Fq 'categorySlug(' "$src"
+          grep -Fq 'drawThemeBackground(' "$src"
+          grep -Fq 'parent_path() / "covers"' "$src"
+          grep -Fq 'SDL_SoftStretchLinear(src, nullptr, out, nullptr)' "$src"
+          grep -Fxq 'BR2_PACKAGE_PUPPY=y' rootfs/configs/goodluck_defconfig
+
+      - name: Create Buildroot directories
+        run: mkdir -p rootfs/dl rootfs/out
+
+      - name: Cache Buildroot download sources
+        uses: actions/cache@v4
+        with:
+          path: rootfs/dl
+          key: ga36-puppy-theme-dl-v1-${{ hashFiles('rootfs/Dockerfile', 'rootfs/configs/goodluck_defconfig') }}
+          restore-keys: |
+            ga36-puppy-theme-dl-v1-
+            ga36-settings-br-dl-v1-
+            ga36-br-dl-v1-
+
+      - name: Compile Puppy package and prerequisites
+        working-directory: rootfs
+        run: |
+          docker compose run --build --rm goodluck-builder bash -lc '
+            set -e
+            /src/scripts/configure.sh
+            /src/scripts/build.sh puppy
+          '
+
+      - name: Verify ARM32 executable and collect test artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=rootfs/out/target/usr/bin/puppy
+          test -s "$bin"
+          file "$bin"
+          readelf -h "$bin"
+          test "$(readelf -h "$bin" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = 'ARM'
+          mkdir -p puppy-test
+          cp "$bin" puppy-test/puppy
+          sha256sum puppy-test/puppy > puppy-test/SHA256SUMS.txt
+
+      - name: Upload experimental Puppy executable (no automatic install)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GA36-Puppy-All-Systems-N64-Theme-Experimental
+          path: puppy-test/
+          if-no-files-found: error
