@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
+#include "puppy_theme.h"
 
 #include <algorithm>
 #include <cctype>
@@ -599,6 +600,7 @@ public:
         else std::cerr << "Warning: could not load /usr/share/puppy/assets/overlay.png\n";
 
         icons = std::make_unique<IconCache>(renderer, "/usr/share/puppy/assets/fallback.png");
+        initializeTheme();
         ok_ = true;
     }
 
@@ -618,6 +620,16 @@ public:
 
     bool ok() const { return ok_; }
 
+    // Cycle installed themes with X; update the small active-theme file on HOME.
+    // Never touch the GoodLuckOS OS partition or the original Puppy executable.
+    void cycleTheme() {
+        auto choices=discoverPuppyThemes();
+        if(choices.size()<2)return;
+        auto it=std::find(choices.begin(),choices.end(),themeStyle.name);
+        size_t next=it==choices.end()?0:((size_t)(it-choices.begin())+1)%choices.size();
+        activateTheme(choices[next],true);
+    }
+
     void render(const Model& m, int battery) {
         if (m.categories.empty()) return;
         const std::string& name=m.categories[m.row].name;
@@ -625,32 +637,36 @@ public:
         if(key!=bgKey) {
             bgKey=key;
             if(bgTex){SDL_DestroyTexture(bgTex);bgTex=nullptr;}
-            std::string stem="/home/player/.config/puppy/themes/n64-unified/backgrounds/"+key;
+            std::string stem=themeStyle.backgroundDir+"/"+key;
             for(const char* ext:{".png",".jpg",".jpeg"}) {
                 bgTex=IMG_LoadTexture(renderer,(stem+ext).c_str());
                 if(bgTex)break;
             }
         }
-        Uint8 red=(Uint8)(15+(m.row*29)%35), green=(Uint8)(20+(m.row*11)%35);
-        Uint8 blue=(Uint8)(50+(m.row*17)%42);
-        SDL_SetRenderDrawColor(renderer,red,green,blue,255);
+        SDL_SetRenderDrawColor(renderer,themeStyle.background.r,
+            themeStyle.background.g,themeStyle.background.b,255);
         SDL_RenderClear(renderer);
         if(bgTex)SDL_RenderCopy(renderer,bgTex,nullptr,nullptr);
 
         if(m.gamesView) {
-            fill(0,52,280,382,SDL_Color{4,9,21,215});
-            fill(285,65,340,348,SDL_Color{2,8,20,190});
+            fill(themeStyle.gamePanelX,themeStyle.gamePanelY,
+                 themeStyle.gamePanelW,themeStyle.gamePanelH,themeStyle.panel);
+            fill(themeStyle.artPanelX,themeStyle.artPanelY,
+                 themeStyle.artPanelW,themeStyle.artPanelH,themeStyle.artPanel);
             const auto& cat=m.categories[m.row];
             const int cur=cat.col;
             const int size=(int)cat.entries.size();
             for(int i=0;i<size;i++){
-                int y=235+(i-cur)*42;
-                if(y<66||y>405)continue;
+                int y=themeStyle.gameFocusY+(i-cur)*themeStyle.gameSpacing;
+                if(y<themeStyle.gameClipTop||y>themeStyle.gameClipBottom)continue;
                 if(i==cur){
-                    fill(6,y-7,268,38,SDL_Color{240,181,72,86});
-                    fill(6,y-7,5,38,SDL_Color{255,210,96,255});
+                    fill(themeStyle.gamePanelX+6,y-7,
+                         std::max(5,themeStyle.gamePanelW-12),themeStyle.gameSpacing-4,themeStyle.highlight);
+                    fill(themeStyle.gamePanelX+6,y-7,5,themeStyle.gameSpacing-4,themeStyle.accent);
                 }
-                drawText(renderer,descFont,cat.entries[i].name,18,y,i==cur?kYellow:kWhite,246);
+                drawText(renderer,descFont,cat.entries[i].name,themeStyle.gameTextX,y,
+                    i==cur?themeStyle.selectedText:themeStyle.text,
+                    themeStyle.gameTextWidth);
             }
             if(size>0) {
                 const Entry& e=cat.entries[cur];
@@ -664,26 +680,47 @@ public:
                     }
                 }
                 if(gameArt&&artW>0&&artH>0){
-                    float factor=std::min(320.0f/artW,285.0f/artH);
+                    const int bw=std::max(1,themeStyle.artBoxW),bh=std::max(1,themeStyle.artBoxH);
+                    float factor=themeStyle.artFit=="cover"
+                        ?std::max((float)bw/artW,(float)bh/artH)
+                        :std::min((float)bw/artW,(float)bh/artH);
                     int w=std::max(1,(int)std::lround(artW*factor));
                     int h=std::max(1,(int)std::lround(artH*factor));
-                    SDL_Rect dst{294+(320-w)/2,103+(285-h)/2,w,h};
-                    SDL_RenderCopy(renderer,gameArt,nullptr,&dst);
-                }else drawText(renderer,descFont,"NO GAME ART",368,230,kWhite,210);
+                    if(themeStyle.artFit=="cover") {
+                        int sw=std::max(1,std::min(artW,(int)std::lround(bw/factor)));
+                        int sh=std::max(1,std::min(artH,(int)std::lround(bh/factor)));
+                        SDL_Rect src{(artW-sw)/2,(artH-sh)/2,sw,sh};
+                        SDL_Rect dst{themeStyle.artBoxX,themeStyle.artBoxY,bw,bh};
+                        SDL_RenderCopy(renderer,gameArt,&src,&dst);
+                    }else{
+                        SDL_Rect dst{themeStyle.artBoxX+(bw-w)/2,
+                                     themeStyle.artBoxY+(bh-h)/2,w,h};
+                        SDL_RenderCopy(renderer,gameArt,nullptr,&dst);
+                    }
+                }else drawText(renderer,descFont,"NO GAME ART",
+                    themeStyle.artBoxX+16,themeStyle.artBoxY+themeStyle.artBoxH/2,
+                    themeStyle.text,std::max(20,themeStyle.artBoxW-24));
             }
             drawHeaderFooter(true,m,battery);
-            drawText(renderer,badgeFont,name,295,73,kYellow,309);
+            drawText(renderer,badgeFont,name,themeStyle.artPanelX+12,
+                themeStyle.artPanelY+8,themeStyle.selectedText,
+                std::max(20,themeStyle.artPanelW-20));
         }else{
-            fill(0,52,290,382,SDL_Color{4,9,21,205});
+            fill(themeStyle.systemPanelX,themeStyle.systemPanelY,
+                 themeStyle.systemPanelW,themeStyle.systemPanelH,themeStyle.panel);
             for(int i=0;i<(int)m.categories.size();i++){
-                int y=235+(i-m.row)*49;
-                if(y<68||y>405)continue;
+                int y=themeStyle.systemFocusY+(i-m.row)*themeStyle.systemSpacing;
+                if(y<themeStyle.systemClipTop||y>themeStyle.systemClipBottom)continue;
                 if(i==m.row){
-                    fill(7,y-7,274,43,SDL_Color{240,181,72,86});
-                    fill(7,y-7,5,43,SDL_Color{255,210,96,255});
+                    fill(themeStyle.systemPanelX+7,y-7,
+                        std::max(5,themeStyle.systemPanelW-14),
+                        themeStyle.systemSpacing-6,themeStyle.highlight);
+                    fill(themeStyle.systemPanelX+7,y-7,5,
+                        themeStyle.systemSpacing-6,themeStyle.accent);
                 }
                 drawText(renderer,i==m.row?uiFont:descFont,m.categories[i].name,
-                         22,y,i==m.row?kYellow:kWhite,254);
+                    themeStyle.systemTextX,y,i==m.row?themeStyle.selectedText:themeStyle.text,
+                    themeStyle.systemTextWidth);
             }
             drawHeaderFooter(false,m,battery);
         }
@@ -697,6 +734,32 @@ private:
     SDL_Texture* overlay = nullptr;
     TTF_Font *uiFont = nullptr, *titleFont = nullptr, *descFont = nullptr, *badgeFont = nullptr;
     std::unique_ptr<IconCache> icons;
+    PuppyThemeStyle themeStyle;
+    void initializeTheme() {
+        auto installed=discoverPuppyThemes();
+        std::string requested=readPuppyActiveTheme();
+        if(std::find(installed.begin(),installed.end(),requested)==installed.end())
+            requested=std::find(installed.begin(),installed.end(),"n64-unified")!=installed.end()
+                ?"n64-unified":(installed.empty()?"n64-unified":installed.front());
+        activateTheme(requested,false);
+    }
+    void activateTheme(const std::string& name,bool persist) {
+        PuppyThemeStyle newTheme=loadPuppyTheme(name);
+        auto reopen=[&](TTF_Font*& target,int size) {
+            TTF_Font* fresh=TTF_OpenFont(newTheme.fontPath.c_str(),size);
+            if(!fresh && newTheme.fontPath!="/usr/share/fonts/Inter_24pt-Medium.ttf")
+                fresh=TTF_OpenFont("/usr/share/fonts/Inter_24pt-Medium.ttf",size);
+            if(fresh){if(target)TTF_CloseFont(target);target=fresh;}
+        };
+        reopen(uiFont,newTheme.selectedFontSize);
+        reopen(descFont,newTheme.listFontSize);
+        reopen(titleFont,newTheme.titleFontSize);
+        reopen(badgeFont,newTheme.smallFontSize);
+        themeStyle=newTheme;
+        if(bgTex){SDL_DestroyTexture(bgTex);bgTex=nullptr;}
+        bgKey.clear();
+        if(persist)writePuppyActiveTheme(name);
+    }
 
     SDL_Texture* bgTex = nullptr;
     SDL_Texture* gameArt = nullptr;
@@ -717,20 +780,22 @@ private:
         SDL_RenderFillRect(renderer,&dst);
     }
     void drawHeaderFooter(bool games,const Model& m,int battery){
-        fill(0,0,640,52,SDL_Color{6,12,24,192});
-        fill(0,434,640,46,SDL_Color{6,12,24,222});
-        drawText(renderer,uiFont,games?"GAMES":"SYSTEMS",20,13,kWhite,300);
+        fill(0,0,640,themeStyle.headerH,themeStyle.header);
+        fill(0,themeStyle.footerY,640,480-themeStyle.footerY,themeStyle.footer);
+        drawText(renderer,uiFont,games?"GAMES":"SYSTEMS",
+                 themeStyle.headerTitleX,themeStyle.headerTitleY,themeStyle.text,300);
+        if(!games)drawText(renderer,badgeFont,themeStyle.title,350,18,themeStyle.text,130);
         std::string count;
         if(games){
             const auto& cat=m.categories[m.row];
             count=std::to_string(cat.col+1)+" / "+std::to_string(cat.entries.size());
         }else count=std::to_string(m.row+1)+" / "+std::to_string(m.categories.size());
-        drawText(renderer,badgeFont,count,490,17,kWhite,92);
+        drawText(renderer,badgeFont,count,490,17,themeStyle.text,92);
         if(battery>=0)
-            drawText(renderer,badgeFont,std::to_string(battery)+"%",580,17,kWhite,55);
+            drawText(renderer,badgeFont,std::to_string(battery)+"%",580,17,themeStyle.text,55);
         drawText(renderer,badgeFont,
-            games?"UP/DOWN SELECT   A PLAY   B BACK":"UP/DOWN SYSTEMS   A OPEN",
-            20,452,kWhite,586);
+            games?"UP/DOWN SELECT  A PLAY  B BACK":"UP/DOWN SYSTEMS  A OPEN  X THEME",
+            20,themeStyle.footerTextY,themeStyle.text,600);
     }
 
     void drawText_(const Model& m, int battery) {
@@ -767,7 +832,7 @@ private:
     }
 };
 
-enum class Action { None, Up, Down, Left, Right, Launch, Back, ToggleAutoStart };
+enum class Action { None, Up, Down, Left, Right, Launch, Back, NextTheme, ToggleAutoStart };
 
 static Action actionFromKey(SDL_Keycode k) {
     switch (k) {
@@ -777,6 +842,7 @@ static Action actionFromKey(SDL_Keycode k) {
         case SDLK_RIGHT:  return Action::Right;
         case SDLK_RETURN: return Action::Launch;
         case SDLK_SPACE:  return Action::ToggleAutoStart;
+        case SDLK_t:      return Action::NextTheme;
         case SDLK_ESCAPE: return Action::Back;
         case SDLK_BACKSPACE: return Action::Back;
         default:          return Action::None;
@@ -796,6 +862,7 @@ static Action actionFromButton(Uint8 b) {
         case SDL_CONTROLLER_BUTTON_A:          return Action::Launch;
         case SDL_CONTROLLER_BUTTON_B:          return Action::Back;
         case SDL_CONTROLLER_BUTTON_Y:          return Action::ToggleAutoStart;
+        case SDL_CONTROLLER_BUTTON_X:          return Action::NextTheme;
         default:                               return Action::None;
     }
 }
@@ -925,6 +992,7 @@ int main() {
                 case Action::Left:  if(model.gamesView) model.move(-1,0); else model.move(0,-1); break;
                 case Action::Right: if(model.gamesView) model.move(1,0); else model.move(0,1); break;
                 case Action::Back: if(model.gamesView) model.gamesView=false; held=Action::None; break;
+                case Action::NextTheme: if(!model.gamesView)ui.cycleTheme(); held=Action::None; break;
                 case Action::ToggleAutoStart: if(model.gamesView)toggleAutoStart(model); break;
                 case Action::Launch:
                     held=Action::None;
