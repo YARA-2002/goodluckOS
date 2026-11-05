@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
+#include "puppy_theme.h"
 
 #include <algorithm>
 #include <cctype>
@@ -270,6 +271,7 @@ struct Category {
 struct Model {
     std::vector<Category> categories;
     int row = 0;
+    bool gamesView = false; // GA36_TWO_LEVEL_THEME_V2
     int& col() { return categories[row].col; }
     int  col() const { return categories[row].col; }
     int autoRow = -1, autoCol = -1;
@@ -598,11 +600,14 @@ public:
         else std::cerr << "Warning: could not load /usr/share/puppy/assets/overlay.png\n";
 
         icons = std::make_unique<IconCache>(renderer, "/usr/share/puppy/assets/fallback.png");
+        initializeTheme();
         ok_ = true;
     }
 
     ~Ui() {
         icons.reset();
+        if(bgTex) SDL_DestroyTexture(bgTex);
+        if(gameArt) SDL_DestroyTexture(gameArt);
         if (overlay) SDL_DestroyTexture(overlay);
         for (TTF_Font* f : {uiFont, titleFont, descFont, badgeFont}) if (f) TTF_CloseFont(f);
         if (renderer) SDL_DestroyRenderer(renderer);
@@ -615,26 +620,110 @@ public:
 
     bool ok() const { return ok_; }
 
+    // Cycle installed themes with X; update the small active-theme file on HOME.
+    // Never touch the GoodLuckOS OS partition or the original Puppy executable.
+    void cycleTheme() {
+        auto choices=discoverPuppyThemes();
+        if(choices.size()<2)return;
+        auto it=std::find(choices.begin(),choices.end(),themeStyle.name);
+        size_t next=it==choices.end()?0:((size_t)(it-choices.begin())+1)%choices.size();
+        activateTheme(choices[next],true);
+    }
+
     void render(const Model& m, int battery) {
-        SDL_SetRenderDrawColor(renderer, kClear.r, kClear.g, kClear.b, kClear.a);
-        SDL_RenderClear(renderer);
-
-        for (int r = 0; r < (int)m.categories.size(); ++r) {
-            int y = kSelY + (r - m.row) * kPitchY;
-            if (y >= kScreenH || y + kCellHeight <= 0) continue;
-
-            const auto& entries = m.categories[r].entries;
-            int rowCol = m.categories[r].col;
-            for (int c = 0; c < (int)entries.size(); ++c) {
-                int x = kSelX + (c - rowCol) * kPitchX;
-                if (x >= kScreenW || x + kCellWidth <= 0) continue;
-                entries[c].render(renderer, *icons, badgeFont, x, y,
-                                  r == m.row && c == rowCol, m.isAutoStart(r, c));
+        if (m.categories.empty()) return;
+        const std::string& name=m.categories[m.row].name;
+        const std::string key=slug(name);
+        if(key!=bgKey) {
+            bgKey=key;
+            if(bgTex){SDL_DestroyTexture(bgTex);bgTex=nullptr;}
+            std::string stem=themeStyle.backgroundDir+"/"+key;
+            for(const char* ext:{".png",".jpg",".jpeg"}) {
+                bgTex=IMG_LoadTexture(renderer,(stem+ext).c_str());
+                if(bgTex)break;
             }
         }
+        SDL_SetRenderDrawColor(renderer,themeStyle.background.r,
+            themeStyle.background.g,themeStyle.background.b,255);
+        SDL_RenderClear(renderer);
+        if(bgTex)SDL_RenderCopy(renderer,bgTex,nullptr,nullptr);
 
-        if (overlay) SDL_RenderCopy(renderer, overlay, nullptr, nullptr);
-        drawText_(m, battery);
+        if(m.gamesView) {
+            fill(themeStyle.gamePanelX,themeStyle.gamePanelY,
+                 themeStyle.gamePanelW,themeStyle.gamePanelH,themeStyle.panel);
+            fill(themeStyle.artPanelX,themeStyle.artPanelY,
+                 themeStyle.artPanelW,themeStyle.artPanelH,themeStyle.artPanel);
+            const auto& cat=m.categories[m.row];
+            const int cur=cat.col;
+            const int size=(int)cat.entries.size();
+            for(int i=0;i<size;i++){
+                int y=themeStyle.gameFocusY+(i-cur)*themeStyle.gameSpacing;
+                if(y<themeStyle.gameClipTop||y>themeStyle.gameClipBottom)continue;
+                if(i==cur){
+                    fill(themeStyle.gamePanelX+6,y-7,
+                         std::max(5,themeStyle.gamePanelW-12),themeStyle.gameSpacing-4,themeStyle.highlight);
+                    fill(themeStyle.gamePanelX+6,y-7,5,themeStyle.gameSpacing-4,themeStyle.accent);
+                }
+                drawText(renderer,descFont,cat.entries[i].name,themeStyle.gameTextX,y,
+                    i==cur?themeStyle.selectedText:themeStyle.text,
+                    themeStyle.gameTextWidth);
+            }
+            if(size>0) {
+                const Entry& e=cat.entries[cur];
+                if(gameArtKey!=e.iconPath) {
+                    gameArtKey=e.iconPath;
+                    if(gameArt){SDL_DestroyTexture(gameArt);gameArt=nullptr;}
+                    artW=artH=0;
+                    if(!gameArtKey.empty()){
+                        gameArt=IMG_LoadTexture(renderer,gameArtKey.c_str());
+                        if(gameArt) SDL_QueryTexture(gameArt,nullptr,nullptr,&artW,&artH);
+                    }
+                }
+                if(gameArt&&artW>0&&artH>0){
+                    const int bw=std::max(1,themeStyle.artBoxW),bh=std::max(1,themeStyle.artBoxH);
+                    float factor=themeStyle.artFit=="cover"
+                        ?std::max((float)bw/artW,(float)bh/artH)
+                        :std::min((float)bw/artW,(float)bh/artH);
+                    int w=std::max(1,(int)std::lround(artW*factor));
+                    int h=std::max(1,(int)std::lround(artH*factor));
+                    if(themeStyle.artFit=="cover") {
+                        int sw=std::max(1,std::min(artW,(int)std::lround(bw/factor)));
+                        int sh=std::max(1,std::min(artH,(int)std::lround(bh/factor)));
+                        SDL_Rect src{(artW-sw)/2,(artH-sh)/2,sw,sh};
+                        SDL_Rect dst{themeStyle.artBoxX,themeStyle.artBoxY,bw,bh};
+                        SDL_RenderCopy(renderer,gameArt,&src,&dst);
+                    }else{
+                        SDL_Rect dst{themeStyle.artBoxX+(bw-w)/2,
+                                     themeStyle.artBoxY+(bh-h)/2,w,h};
+                        SDL_RenderCopy(renderer,gameArt,nullptr,&dst);
+                    }
+                }else drawText(renderer,descFont,"NO GAME ART",
+                    themeStyle.artBoxX+16,themeStyle.artBoxY+themeStyle.artBoxH/2,
+                    themeStyle.text,std::max(20,themeStyle.artBoxW-24));
+            }
+            drawHeaderFooter(true,m,battery);
+            drawText(renderer,badgeFont,name,themeStyle.artPanelX+12,
+                themeStyle.artPanelY+8,themeStyle.selectedText,
+                std::max(20,themeStyle.artPanelW-20));
+        }else{
+            fill(themeStyle.systemPanelX,themeStyle.systemPanelY,
+                 themeStyle.systemPanelW,themeStyle.systemPanelH,themeStyle.panel);
+            for(int i=0;i<(int)m.categories.size();i++){
+                int y=themeStyle.systemFocusY+(i-m.row)*themeStyle.systemSpacing;
+                if(y<themeStyle.systemClipTop||y>themeStyle.systemClipBottom)continue;
+                if(i==m.row){
+                    fill(themeStyle.systemPanelX+7,y-7,
+                        std::max(5,themeStyle.systemPanelW-14),
+                        themeStyle.systemSpacing-6,themeStyle.highlight);
+                    fill(themeStyle.systemPanelX+7,y-7,5,
+                        themeStyle.systemSpacing-6,themeStyle.accent);
+                }
+                drawText(renderer,i==m.row?uiFont:descFont,m.categories[i].name,
+                    themeStyle.systemTextX,y,i==m.row?themeStyle.selectedText:themeStyle.text,
+                    themeStyle.systemTextWidth);
+            }
+            drawHeaderFooter(false,m,battery);
+        }
         SDL_RenderPresent(renderer);
     }
 
@@ -645,6 +734,69 @@ private:
     SDL_Texture* overlay = nullptr;
     TTF_Font *uiFont = nullptr, *titleFont = nullptr, *descFont = nullptr, *badgeFont = nullptr;
     std::unique_ptr<IconCache> icons;
+    PuppyThemeStyle themeStyle;
+    void initializeTheme() {
+        auto installed=discoverPuppyThemes();
+        std::string requested=readPuppyActiveTheme();
+        if(std::find(installed.begin(),installed.end(),requested)==installed.end())
+            requested=std::find(installed.begin(),installed.end(),"n64-unified")!=installed.end()
+                ?"n64-unified":(installed.empty()?"n64-unified":installed.front());
+        activateTheme(requested,false);
+    }
+    void activateTheme(const std::string& name,bool persist) {
+        PuppyThemeStyle newTheme=loadPuppyTheme(name);
+        auto reopen=[&](TTF_Font*& target,int size) {
+            TTF_Font* fresh=TTF_OpenFont(newTheme.fontPath.c_str(),size);
+            if(!fresh && newTheme.fontPath!="/usr/share/fonts/Inter_24pt-Medium.ttf")
+                fresh=TTF_OpenFont("/usr/share/fonts/Inter_24pt-Medium.ttf",size);
+            if(fresh){if(target)TTF_CloseFont(target);target=fresh;}
+        };
+        reopen(uiFont,newTheme.selectedFontSize);
+        reopen(descFont,newTheme.listFontSize);
+        reopen(titleFont,newTheme.titleFontSize);
+        reopen(badgeFont,newTheme.smallFontSize);
+        themeStyle=newTheme;
+        if(bgTex){SDL_DestroyTexture(bgTex);bgTex=nullptr;}
+        bgKey.clear();
+        if(persist)writePuppyActiveTheme(name);
+    }
+
+    SDL_Texture* bgTex = nullptr;
+    SDL_Texture* gameArt = nullptr;
+    std::string bgKey,gameArtKey;
+    int artW=0,artH=0;
+    static std::string slug(const std::string& input){
+        std::string out; bool dash=false;
+        for(unsigned char ch:input){
+            if(std::isalnum(ch)){out+=(char)std::tolower(ch);dash=false;}
+            else if(!out.empty()&&!dash){out+='-';dash=true;}
+        }
+        if(!out.empty()&&out.back()=='-')out.pop_back();
+        return out;
+    }
+    void fill(int x,int y,int w,int h,SDL_Color color){
+        SDL_SetRenderDrawColor(renderer,color.r,color.g,color.b,color.a);
+        SDL_Rect dst{x,y,w,h};
+        SDL_RenderFillRect(renderer,&dst);
+    }
+    void drawHeaderFooter(bool games,const Model& m,int battery){
+        fill(0,0,640,themeStyle.headerH,themeStyle.header);
+        fill(0,themeStyle.footerY,640,480-themeStyle.footerY,themeStyle.footer);
+        drawText(renderer,uiFont,games?"GAMES":"SYSTEMS",
+                 themeStyle.headerTitleX,themeStyle.headerTitleY,themeStyle.text,300);
+        if(!games)drawText(renderer,badgeFont,themeStyle.title,350,18,themeStyle.text,130);
+        std::string count;
+        if(games){
+            const auto& cat=m.categories[m.row];
+            count=std::to_string(cat.col+1)+" / "+std::to_string(cat.entries.size());
+        }else count=std::to_string(m.row+1)+" / "+std::to_string(m.categories.size());
+        drawText(renderer,badgeFont,count,490,17,themeStyle.text,92);
+        if(battery>=0)
+            drawText(renderer,badgeFont,std::to_string(battery)+"%",580,17,themeStyle.text,55);
+        drawText(renderer,badgeFont,
+            games?"UP/DOWN SELECT  A PLAY  B BACK":"UP/DOWN SYSTEMS  A OPEN  X THEME",
+            20,themeStyle.footerTextY,themeStyle.text,600);
+    }
 
     void drawText_(const Model& m, int battery) {
         const int maxW = kScreenW - 2 * kTextMargin;
@@ -680,7 +832,7 @@ private:
     }
 };
 
-enum class Action { None, Up, Down, Left, Right, Launch, ToggleAutoStart };
+enum class Action { None, Up, Down, Left, Right, Launch, Back, NextTheme, ToggleAutoStart };
 
 static Action actionFromKey(SDL_Keycode k) {
     switch (k) {
@@ -690,6 +842,9 @@ static Action actionFromKey(SDL_Keycode k) {
         case SDLK_RIGHT:  return Action::Right;
         case SDLK_RETURN: return Action::Launch;
         case SDLK_SPACE:  return Action::ToggleAutoStart;
+        case SDLK_t:      return Action::NextTheme;
+        case SDLK_ESCAPE: return Action::Back;
+        case SDLK_BACKSPACE: return Action::Back;
         default:          return Action::None;
     }
 }
@@ -705,7 +860,9 @@ static Action actionFromButton(Uint8 b) {
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return Action::Left;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return Action::Right;
         case SDL_CONTROLLER_BUTTON_A:          return Action::Launch;
+        case SDL_CONTROLLER_BUTTON_B:          return Action::Back;
         case SDL_CONTROLLER_BUTTON_Y:          return Action::ToggleAutoStart;
+        case SDL_CONTROLLER_BUTTON_X:          return Action::NextTheme;
         default:                               return Action::None;
     }
 }
@@ -830,17 +987,17 @@ int main() {
             }
 
             switch (action) {
-                case Action::Up:    model.move(0, -1); break;
-                case Action::Down:  model.move(0, 1);  break;
-                case Action::Left:  model.move(-1, 0); break;
-                case Action::Right: model.move(1, 0);  break;
-                case Action::ToggleAutoStart: toggleAutoStart(model); break;
+                case Action::Up:    if(model.gamesView) model.move(-1,0); else model.move(0,-1); break;
+                case Action::Down:  if(model.gamesView) model.move(1,0); else model.move(0,1); break;
+                case Action::Left:  if(model.gamesView) model.move(-1,0); else model.move(0,-1); break;
+                case Action::Right: if(model.gamesView) model.move(1,0); else model.move(0,1); break;
+                case Action::Back: if(model.gamesView) model.gamesView=false; held=Action::None; break;
+                case Action::NextTheme: if(!model.gamesView)ui.cycleTheme(); held=Action::None; break;
+                case Action::ToggleAutoStart: if(model.gamesView)toggleAutoStart(model); break;
                 case Action::Launch:
-                    held = Action::None;
-                    if (const Entry* e = model.selected()) {
-                        launch(model, *e);
-                        //running = false;
-                    }
+                    held=Action::None;
+                    if(!model.gamesView) model.gamesView=true;
+                    else if(const Entry* e=model.selected()) launch(model,*e);
                     break;
                 case Action::None: break;
             }
