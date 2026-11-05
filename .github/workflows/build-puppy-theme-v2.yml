@@ -1,0 +1,66 @@
+name: Build GA36 Puppy Two-Level Theme V2
+
+on:
+  push:
+    branches:
+      - feature/ga36-puppy-two-level-theme-v2-20261105
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-puppy-v2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+
+      - name: Verify two-level source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q GA36_TWO_LEVEL_THEME_V2 rootfs/package/puppy/puppy.cpp
+          grep -q 'SDL_CONTROLLER_BUTTON_B:.*Action::Back' rootfs/package/puppy/puppy.cpp
+
+      - name: Prepare Buildroot
+        run: mkdir -p rootfs/dl rootfs/out
+
+      - name: Cache Buildroot downloads
+        uses: actions/cache@v4
+        with:
+          path: rootfs/dl
+          key: ga36-puppy-br-dl-v1-${{ hashFiles('rootfs/Dockerfile', 'rootfs/configs/goodluck_defconfig') }}
+          restore-keys: |
+            ga36-settings-br-dl-v1-
+            ga36-br-dl-v1-
+
+      - name: Build Puppy ARM32 via original toolchain
+        working-directory: rootfs
+        run: |
+          docker compose run --build --rm goodluck-builder bash -lc '
+            set -e
+            /src/scripts/configure.sh
+            /src/scripts/build.sh puppy
+          '
+
+      - name: Validate ARM binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=rootfs/out/target/usr/bin/puppy
+          test -s "$BIN"
+          file "$BIN"
+          readelf -h "$BIN"
+          test "$(readelf -h "$BIN" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = ARM
+          mkdir -p theme-build
+          cp "$BIN" theme-build/puppy
+          (cd theme-build && sha256sum puppy > SHA256SUMS.txt)
+
+      - name: Publish test executable only (never install OS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GA36-Puppy-Two-Level-Theme-V2-ARM32
+          path: theme-build/
+          if-no-files-found: error
